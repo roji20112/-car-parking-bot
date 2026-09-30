@@ -177,7 +177,7 @@ def support(call):
 
     bot.send_message(
         call.message.chat.id,
-        "📞 للدعم تواصل مع الإدارة."
+        "📞 للدعم تواصل مع الإدارة.@M31_ROJI2"
     )
 
 
