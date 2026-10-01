@@ -1,204 +1,134 @@
 import os
-import json
-import telebot
-from telebot import types
+import asyncio
+import tempfile
+import subprocess
+
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = 8514140307
 
-bot = telebot.TeleBot(TOKEN)
-
-FILE = "users.json"
-
-user_state = {}
+MAX_FILE_SIZE = 1 * 1024 * 1024
+TIMEOUT = 20
 
 
-# =====================
-# DATABASE
-# =====================
-
-def load_users():
-    try:
-        with open(FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {}
-
-
-def save_users(data):
-    with open(FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-# =====================
-# MENU
-# =====================
-
-def menu(user_id):
-
-    kb = types.InlineKeyboardMarkup(row_width=2)
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "👤 حسابي",
-            callback_data="account"
-        ),
-        types.InlineKeyboardButton(
-            "🚗 إضافة حساب",
-            callback_data="add_account"
-        )
-    )
-
-    kb.add(
-        types.InlineKeyboardButton(
-            "💰 المال",
-            callback_data="money"
-        ),
-        types.InlineKeyboardButton(
-            "🪙 Coins",
-            callback_data="coins"
-        )
-    )
-
-    if user_id == ADMIN_ID:
-        kb.add(
-            types.InlineKeyboardButton(
-                "👑 Admin",
-                callback_data="admin"
-            )
-        )
-
-    return kb
-
-
-# =====================
-# START
-# =====================
-
-@bot.message_handler(commands=["start"])
-def start(message):
-
-    bot.send_message(
-        message.chat.id,
-        "🚗 Car Parking Bot\n\nاختر:",
-        reply_markup=menu(message.from_user.id)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🐍 Python Runner Bot\n\n"
+        "أرسل لي ملف .py وسأقوم بتشغيله وإرسال النتيجة."
     )
 
 
-# =====================
-# BUTTONS
-# =====================
+async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-@bot.callback_query_handler(func=lambda c: True)
-def buttons(call):
+    document = update.message.document
 
-    uid = str(call.from_user.id)
-    users = load_users()
-
-    if call.data == "account":
-
-        if uid not in users:
-
-            bot.send_message(
-                call.message.chat.id,
-                "❌ لا يوجد حساب"
-            )
-
-        else:
-
-            u = users[uid]
-
-            bot.send_message(
-                call.message.chat.id,
-                f"👤 حسابك\n\n"
-                f"🚗 ID: {u['car_id']}\n"
-                f"💰 المال: {u['money']}\n"
-                f"🪙 Coins: {u['coins']}"
-            )
-
-
-    elif call.data == "add_account":
-
-        user_state[uid] = "car_id"
-
-        bot.send_message(
-            call.message.chat.id,
-            "🚗 أرسل ID حساب Car Parking:"
+    if not document.file_name.endswith(".py"):
+        await update.message.reply_text(
+            "❌ أرسل ملف Python بصيغة .py فقط."
         )
-
-
-    elif call.data == "money":
-
-        money = users.get(uid, {}).get("money",0)
-
-        bot.send_message(
-            call.message.chat.id,
-            f"💰 المال: {money}"
-        )
-
-
-    elif call.data == "coins":
-
-        coins = users.get(uid, {}).get("coins",0)
-
-        bot.send_message(
-            call.message.chat.id,
-            f"🪙 Coins: {coins}"
-        )
-
-
-    elif call.data == "admin":
-
-        if call.from_user.id != ADMIN_ID:
-            return
-
-        bot.send_message(
-            call.message.chat.id,
-            "👑 لوحة Admin\n\n"
-            "عدد المستخدمين: "
-            + str(len(users))
-        )
-
-
-# =====================
-# USER INPUT
-# =====================
-
-@bot.message_handler(func=lambda m: True)
-def text(message):
-
-    uid = str(message.from_user.id)
-
-    if uid not in user_state:
         return
 
+    if document.file_size and document.file_size > MAX_FILE_SIZE:
+        await update.message.reply_text(
+            "❌ حجم الملف كبير جدًا."
+        )
+        return
 
-    if user_state[uid] == "car_id":
+    msg = await update.message.reply_text(
+        "⏳ جاري تحميل وتشغيل الملف..."
+    )
 
-        users = load_users()
+    temp_dir = tempfile.mkdtemp()
+    file_path = os.path.join(temp_dir, "main.py")
 
-        users[uid] = {
-            "car_id": message.text,
-            "money": 0,
-            "coins": 0
-        }
+    try:
+        file = await document.get_file()
+        await file.download_to_drive(file_path)
 
-        save_users(users)
-
-        del user_state[uid]
-
-
-        bot.send_message(
-            message.chat.id,
-            "✅ تم إضافة حساب Car Parking",
-            reply_markup=menu(message.from_user.id)
+        process = await asyncio.create_subprocess_exec(
+            "docker",
+            "run",
+            "--rm",
+            "--network=none",
+            "--memory=128m",
+            "--cpus=0.5",
+            "--pids-limit=50",
+            "-v",
+            f"{temp_dir}:/app:ro",
+            "python:3.12-alpine",
+            "python",
+            "/app/main.py",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
 
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            await msg.edit_text(
+                "⏱️ تم إيقاف البرنامج لأنه تجاوز الوقت المحدد."
+            )
+            return
 
-# =====================
-# RUN
-# =====================
+        output = stdout.decode("utf-8", errors="replace")
+        error = stderr.decode("utf-8", errors="replace")
 
-print("BOT STARTED")
+        result = output
 
-bot.infinity_polling()
+        if error:
+            result += "\n\n❌ ERROR:\n" + error
+
+        if not result.strip():
+            result = "✅ انتهى البرنامج بدون إخراج."
+
+        if len(result) > 4000:
+            result = result[:4000] + "\n\n... تم اختصار النتيجة."
+
+        await msg.edit_text(
+            "📤 النتيجة:\n\n" + result
+        )
+
+    except Exception as e:
+        await msg.edit_text(
+            "❌ حدث خطأ:\n" + str(e)
+        )
+
+    finally:
+        try:
+            os.remove(file_path)
+            os.rmdir(temp_dir)
+        except:
+            pass
+
+
+def main():
+    if not TOKEN:
+        raise RuntimeError("BOT_TOKEN غير موجود")
+
+    app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(
+        MessageHandler(
+            filters.Document.ALL,
+            receive_file
+        )
+    )
+
+    print("🤖 Bot started...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
